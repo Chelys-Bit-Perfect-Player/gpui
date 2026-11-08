@@ -1,3 +1,4 @@
+// Changed for Chelys (Chelys-Bit-Perfect-Player/gpui): idle windows let their spare Metal drawables go.
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::Retained,
@@ -54,6 +55,9 @@ pub struct MetalFrameSource {
     // The link holds its delegate weakly.
     _delegate: Retained<MetalDisplayLinkDelegate>,
     _main_thread: MainThreadMarker,
+    layer: Retained<CAMetalLayer>,
+    /// The layer's drawable size while its drawables are let go of.
+    released: std::cell::Cell<Option<objc2_core_foundation::CGSize>>,
 }
 
 impl MetalFrameSource {
@@ -84,6 +88,8 @@ impl MetalFrameSource {
             link,
             _delegate: delegate,
             _main_thread: main_thread,
+            layer: layer.retain(),
+            released: std::cell::Cell::new(None),
         })
     }
 
@@ -91,10 +97,31 @@ impl MetalFrameSource {
     pub fn set_paused(&self, paused: bool) {
         self.link.setPaused(paused);
     }
+
+    /// Lets the layer's pooled drawables go while the link is paused: CAMetalLayer
+    /// drops its pool when its drawable size changes. The drawable on screen stays
+    /// with the layer's contents, so the window looks the same.
+    pub fn release_drawables(&self) {
+        if self.released.get().is_none() && self.link.isPaused() {
+            self.released.set(Some(self.layer.drawableSize()));
+            self.layer.setDrawableSize(objc2_core_foundation::CGSize::new(1.0, 1.0));
+        }
+    }
+
+    /// Gives the layer back its size before it hands out another drawable,
+    /// unless a resize has set a new one since.
+    pub fn restore_drawables(&self) {
+        if let Some(size) = self.released.take()
+            && self.layer.drawableSize() == objc2_core_foundation::CGSize::new(1.0, 1.0)
+        {
+            self.layer.setDrawableSize(size);
+        }
+    }
 }
 
 impl Drop for MetalFrameSource {
     fn drop(&mut self) {
+        self.restore_drawables();
         self.link.invalidate();
     }
 }

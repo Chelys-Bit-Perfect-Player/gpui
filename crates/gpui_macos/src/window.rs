@@ -1,3 +1,4 @@
+// Changed for Chelys (Chelys-Bit-Perfect-Player/gpui): idle windows let their spare Metal drawables go.
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
@@ -3458,7 +3459,9 @@ fn metal_frame(
     // A frame with nothing to draw leaves its drawable unused; releasing it
     // lets the link hand it out again.
     let used_drawable = lock.renderer.set_frame_drawable(None).is_none();
-    metal_frames.end_frame(used_drawable);
+    if metal_frames.end_frame(used_drawable) {
+        metal_frames.release_when_idle();
+    }
 }
 
 extern "C" fn valid_attributes_for_marked_text(_: &AnyObject, _: Sel) -> *mut AnyObject {

@@ -1,3 +1,28 @@
+# GPUI for Chelys
+
+A fork of [Zed](https://github.com/zed-industries/zed) for [Chelys](https://github.com/Chelys-Bit-Perfect-Player)'s
+desktop app, which is built on GPUI. The `chelys` branch is Zed at
+[`b5cd310b`](https://github.com/zed-industries/zed/commit/b5cd310b3b54dfc659fcc06453e6358843dfe216) plus the changes below;
+nothing else differs from Zed.
+
+- **Idle windows let their spare Metal drawables go (macOS 14 and later).** GPUI already pauses a window's
+  `CAMetalDisplayLink` when nothing is drawn, but its `CAMetalLayer` keeps up to four drawables (14.4 MB each at
+  1180×780 @2x). After 10 s paused, the layer's drawable size is set to 1×1, which makes it drop its pool; the
+  drawable on screen stays. The size comes back before the next frame, and a resize in between wins. In
+  `footprint`, an idle window went from 76 to 60–64 MB, and one paused after continuous rendering from 97 to
+  54 MB. Rendering is unchanged. Files: `crates/gpui_apple/src/display_link.rs`,
+  `crates/gpui_macos/src/display_link.rs`, `crates/gpui_macos/src/window.rs`.
+
+Use it like Zed's GPUI, from this repository at a commit on `chelys`:
+
+```toml
+gpui = { git = "https://github.com/Chelys-Bit-Perfect-Player/gpui", rev = "<commit>" }
+```
+
+The changed crates stay under Zed's licence (Apache-2.0, `LICENSE-APACHE`).
+
+---
+
 # Zed
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)

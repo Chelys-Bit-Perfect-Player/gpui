@@ -1,3 +1,4 @@
+// Changed for Chelys (Chelys-Bit-Perfect-Player/gpui): idle windows let their spare Metal drawables go.
 //! Frame pacing for macOS windows.
 //!
 //! On macOS 14 and later a window is paced by a `CAMetalDisplayLink` on its
@@ -306,7 +307,12 @@ pub struct MetalFrames {
     source: RefCell<Option<MetalFrameSource>>,
     /// Whether GPUI asked for a frame since the current update began.
     woken: Cell<bool>,
+    /// Counts wakes, so a release scheduled before one is dropped.
+    wakes: Cell<u64>,
 }
+
+/// How long a window stays idle before its layer's spare drawables are let go.
+const RELEASE_AFTER: Duration = Duration::from_secs(10);
 
 impl MetalFrames {
     pub fn replace(&self, source: Option<MetalFrameSource>) {
@@ -319,12 +325,37 @@ impl MetalFrames {
 
     pub fn wake(&self) {
         self.woken.set(true);
+        self.wakes.set(self.wakes.get().wrapping_add(1));
         // A source being replaced starts unpaused, so skipping it is safe.
         if let Ok(source) = self.source.try_borrow()
             && let Some(source) = source.as_ref()
         {
+            source.restore_drawables();
             source.set_paused(false);
         }
+    }
+
+    /// After the link pauses, lets the layer's drawables go if nothing wakes it
+    /// within `RELEASE_AFTER`.
+    pub fn release_when_idle(self: &std::rc::Rc<Self>) {
+        struct OnMain(std::rc::Weak<MetalFrames>);
+        // SAFETY: made, run and dropped on the main thread (the main queue).
+        unsafe impl Send for OnMain {}
+        let Ok(when) = dispatch2::DispatchTime::try_from(RELEASE_AFTER) else {
+            return;
+        };
+        let wakes = self.wakes.get();
+        let me = OnMain(std::rc::Rc::downgrade(self));
+        let _ = DispatchQueue::main().after(when, move || {
+                let me = me;
+                if let Some(frames) = me.0.upgrade()
+                    && frames.wakes.get() == wakes
+                    && let Ok(source) = frames.source.try_borrow()
+                    && let Some(source) = source.as_ref()
+                {
+                    source.release_drawables();
+                }
+            });
     }
 
     pub fn begin_frame(&self) {
