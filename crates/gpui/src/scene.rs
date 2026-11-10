@@ -13,6 +13,7 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::Arc,
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -111,6 +112,10 @@ impl Scene {
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
+                // Paths arriving still under construction (never scaled, e.g.
+                // inserted straight from the builder) bake here, so everything
+                // stored in, or later replayed out of, a scene shares cheaply.
+                path.vertices.bake();
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline) => {
@@ -783,6 +788,71 @@ impl From<PaintSurface> for Primitive {
 #[expect(missing_docs)]
 pub struct PathId(pub usize);
 
+/// A path's vertices: an owned build buffer while the path is under construction,
+/// then an `Arc` baked slice, so that copying a finished path clones a refcount
+/// instead of its whole geometry list.
+///
+/// The scene clones every path it stores, and cached scenes replayed into new
+/// frames clone those paths again; with the previous `Vec<PathVertex>` each of
+/// those was a full deep copy. Reads dereference to `&[PathVertex<P>]`, so code
+/// holding a path reads its vertices the same way it always did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vertices<P: Clone + Debug + Default + PartialEq> {
+    inner: VerticesInner<P>,
+}
+
+/// The vertices' storage. Private so out-of-crate code stays read-only: reads go
+/// through the slice deref below, and pushes through `Vertices::push`.
+#[derive(Clone, Debug, PartialEq)]
+enum VerticesInner<P: Clone + Debug + Default + PartialEq> {
+    /// Still under construction: grows in place, copied deeply if shared.
+    Building(Vec<PathVertex<P>>),
+    /// Finished: immutable, shared by refcount.
+    Baked(Arc<[PathVertex<P>]>),
+}
+impl<P: Clone + Debug + Default + PartialEq> Vertices<P> {
+    /// Empty vertices, ready to be built.
+    fn building() -> Self {
+        Vertices { inner: VerticesInner::Building(Vec::new()) }
+    }
+
+    /// Bakes already-built vertices. No-op for an already baked list.
+    pub fn bake(&mut self) {
+        if let VerticesInner::Building(building) = &mut self.inner {
+            self.inner = VerticesInner::Baked(Arc::from(std::mem::take(building)));
+        }
+    }
+
+    /// The vertices as a slice, whichever storage they're in.
+    fn as_slice(&self) -> &[PathVertex<P>] {
+        match &self.inner {
+            VerticesInner::Building(building) => building,
+            VerticesInner::Baked(baked) => baked,
+        }
+    }
+
+    /// Appends one vertex, unsharing a baked list by copying it first.
+    fn push(&mut self, vertex: PathVertex<P>) {
+        match &mut self.inner {
+            VerticesInner::Building(building) => building.push(vertex),
+            VerticesInner::Baked(baked) => {
+                let mut building = Vec::with_capacity(baked.len() + 1);
+                building.extend(baked.iter().cloned());
+                building.push(vertex);
+                self.inner = VerticesInner::Building(building);
+            }
+        }
+    }
+}
+
+impl<P: Clone + Debug + Default + PartialEq> std::ops::Deref for Vertices<P> {
+    type Target = [PathVertex<P>];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
 /// A line made up of a series of vertices and control points.
 #[derive(Clone, Debug)]
 #[expect(missing_docs)]
@@ -791,7 +861,7 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub order: DrawOrder,
     pub bounds: Bounds<P>,
     pub content_mask: ContentMask<P>,
-    pub vertices: Vec<PathVertex<P>>,
+    pub vertices: Vertices<P>,
     pub color: Background,
     start: Point<P>,
     current: Point<P>,
@@ -804,7 +874,7 @@ impl Path<Pixels> {
         Self {
             id: PathId(0),
             order: DrawOrder::default(),
-            vertices: Vec::new(),
+            vertices: Vertices::building(),
             start,
             current: start,
             bounds: Bounds {
@@ -824,18 +894,20 @@ impl Path<Pixels> {
             order: self.order,
             bounds: self.bounds.scale(factor),
             content_mask: self.content_mask.scale(factor),
-            vertices: self
-                .vertices
-                .iter()
-                .map(|vertex| vertex.scale(factor))
-                .collect(),
+            vertices: Vertices {
+                inner: VerticesInner::Baked(
+                    self.vertices
+                        .iter()
+                        .map(|vertex| vertex.scale(factor))
+                        .collect(),
+                ),
+            },
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
             color: self.color,
         }
     }
-
     /// Move the start, current point to the given point.
     pub fn move_to(&mut self, to: Point<Pixels>) {
         self.contour_count += 1;
@@ -927,8 +999,7 @@ impl From<Path<ScaledPixels>> for Primitive {
         Primitive::Path(path)
     }
 }
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct PathVertex<P: Clone + Debug + Default + PartialEq> {
